@@ -24,4 +24,4 @@ Read `agents.md` first, then `SKILLS.MD`.
 - Do not mount the repo into containers and do not write artifacts back to the host.
 - Use sequential verification for auth, remotes, repo creation, commits, and pushes.
 - If any failure appears, fix it immediately before continuing, even when it looks tangential.
-- Use `bash` on Linux and macOS, and `wsl -d Ubuntu -- bash -lc "..."` on Windows.
+- Use `bash` on Linux and macOS, and `wsl -d Ubuntu64 -- bash -lc "..."` on Windows.

@@ -376,8 +376,8 @@ docker buildx build -f Dockerfile.demo --target test --progress=plain --pull --l
 docker run --rm mcp-cpp-test ctest --test-dir build --output-on-failure
 
 # Windows (PowerShell via WSL)
-wsl -d Ubuntu -- bash -lc "cd /mnt/c/<path-to-repo>/mcp-cpp && docker buildx build -f Dockerfile.demo --target test --progress=plain --pull --load -t mcp-cpp-test ."
-wsl -d Ubuntu -- bash -lc "cd /mnt/c/<path-to-repo>/mcp-cpp && docker run --rm mcp-cpp-test ctest --test-dir build --output-on-failure"
+wsl -d Ubuntu64 -- bash -lc "cd /mnt/c/<path-to-repo>/mcp-cpp && docker buildx build -f Dockerfile.demo --target test --progress=plain --pull --load -t mcp-cpp-test ."
+wsl -d Ubuntu64 -- bash -lc "cd /mnt/c/<path-to-repo>/mcp-cpp && docker run --rm mcp-cpp-test ctest --test-dir build --output-on-failure"
 ```
 
 ---
