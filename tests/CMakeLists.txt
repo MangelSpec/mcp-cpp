@@ -58,6 +58,7 @@ add_executable(mcp_tests
   test_inmemory_transport.cpp
   test_keepalive.cpp
   test_logging_rate_limit.cpp
+  test_log_handler.cpp
   test_progress.cpp
   test_prompt_pre_dispatch_cancel.cpp
   test_resource_subscriptions.cpp

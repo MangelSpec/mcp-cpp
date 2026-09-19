@@ -25,6 +25,7 @@
 #include <cctype>
 #include <string_view>
 #include "env/EnvVars.h"
+#include "logging/LogHandler.h"
 
 #ifdef _WIN32
 // Helper to convert std::wstring to UTF-8 std::string (Windows only)
@@ -163,6 +164,11 @@ public:
     static void setLogLevel(LogLevel level) {
         sLogLevel = level;
     }
+
+    static void setLogHandler(mcp::logging::LogHandler handler) {
+        std::lock_guard<std::mutex> lock(sLogMutex);
+        sLogHandler = std::move(handler);
+    }
     
     // Parse a textual log level and return the corresponding LogLevel.
     // Recognized values (case-insensitive): DEBUG, INFO, WARN, WARNING, ERROR, FATAL.
@@ -232,6 +238,11 @@ public:
     
     static void log(const char* level, const std::string& msg, const char* file, unsigned int line) {
         std::lock_guard<std::mutex> lock(sLogMutex);
+        if (sLogHandler) {
+            sLogHandler(level, msg, file, line);
+            return;
+        }
+
         std::ostringstream oss;
         // Optional ANSI colorization for LABEL only controlled by MCP_LOG_COLOR
         static bool colorEnabled = [](){
@@ -274,6 +285,7 @@ public:
 private:
     static std::ofstream sLogFile;
     static std::mutex sLogMutex;
+    static mcp::logging::LogHandler sLogHandler;
 };
 
 // Static members declared but not defined here
