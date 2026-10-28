@@ -82,9 +82,9 @@ bool waitUntil(Predicate&& predicate,
     return predicate();
 }
 
-JSONValue makeInitializeParams() {
+JSONValue makeInitializeParams(const std::string& protocolVersion = PROTOCOL_VERSION) {
     JSONValue::Object params;
-    params["protocolVersion"] = std::make_shared<JSONValue>(std::string(PROTOCOL_VERSION));
+    params["protocolVersion"] = std::make_shared<JSONValue>(protocolVersion);
     params["capabilities"] = std::make_shared<JSONValue>(JSONValue::Object{});
 
     JSONValue::Object clientInfo;
@@ -94,9 +94,9 @@ JSONValue makeInitializeParams() {
     return JSONValue{params};
 }
 
-JSONValue makeInitializeResult() {
+JSONValue makeInitializeResult(const std::string& protocolVersion = PROTOCOL_VERSION) {
     JSONValue::Object result;
-    result["protocolVersion"] = std::make_shared<JSONValue>(std::string(PROTOCOL_VERSION));
+    result["protocolVersion"] = std::make_shared<JSONValue>(protocolVersion);
 
     JSONValue::Object serverInfo;
     serverInfo["name"] = std::make_shared<JSONValue>(std::string("Factory Server"));
@@ -557,7 +557,7 @@ TEST(HTTPStreamable, CompatibleLegacyProtocolVersionHeadersAreAcceptedForConcurr
     ASSERT_NO_THROW(server.Stop().get());
 }
 
-TEST(HTTPStreamable, InitializedNotificationReturnsAcceptedOnEndpoint) {
+TEST(HTTPStreamable, OlderProposalUsesNegotiatedVersionForSession) {
     const auto port = findFreePort();
 
     HTTPServer::Options serverOptions;
@@ -574,7 +574,7 @@ TEST(HTTPStreamable, InitializedNotificationReturnsAcceptedOnEndpoint) {
     JSONRPCRequest initializeRequest;
     initializeRequest.id = static_cast<int64_t>(1);
     initializeRequest.method = Methods::Initialize;
-    initializeRequest.params = makeInitializeParams();
+    initializeRequest.params = makeInitializeParams("2025-06-18");
     const auto initializeResponse = sendHttpRequest(
         port,
         http::verb::post,
@@ -588,22 +588,132 @@ TEST(HTTPStreamable, InitializedNotificationReturnsAcceptedOnEndpoint) {
     ASSERT_NE(sessionIt, initializeResponse.headers.end());
     ASSERT_FALSE(sessionIt->second.empty());
 
+    JSONRPCResponse initializeResult;
+    ASSERT_TRUE(initializeResult.Deserialize(initializeResponse.body));
+    ASSERT_FALSE(initializeResult.IsError());
+    ASSERT_TRUE(initializeResult.result.has_value());
+    const auto& result = std::get<JSONValue::Object>(initializeResult.result->value);
+    const auto negotiatedVersion = std::get<std::string>(result.at("protocolVersion")->value);
+    EXPECT_EQ(negotiatedVersion, PROTOCOL_VERSION);
+
+    auto sseStream = openSseStream(
+        port, "/mcp", {{"Mcp-Session-Id", sessionIt->second}, {"MCP-Protocol-Version", negotiatedVersion}});
+    EXPECT_EQ(sseStream->status, 200);
+
     JSONRPCNotification initialized;
     initialized.method = Methods::Initialized;
-    const auto initializedResponse = sendHttpRequest(
-        port,
-        http::verb::post,
-        "/mcp",
-        initialized.Serialize(),
-        {{"Content-Type", "application/json"},
-         {"Accept", "application/json, text/event-stream"},
-         {"Mcp-Session-Id", sessionIt->second},
-         {"MCP-Protocol-Version", PROTOCOL_VERSION}});
+    const auto initializedResponse = sendHttpRequest(port, http::verb::post, "/mcp", initialized.Serialize(),
+                                                     {{"Content-Type", "application/json"},
+                                                      {"Accept", "application/json, text/event-stream"},
+                                                      {"Mcp-Session-Id", sessionIt->second},
+                                                      {"MCP-Protocol-Version", negotiatedVersion}});
 
     EXPECT_EQ(initializedResponse.status, 202);
     EXPECT_TRUE(initializedResponse.body.empty());
 
+    JSONRPCRequest toolsList;
+    toolsList.id = static_cast<int64_t>(2);
+    toolsList.method = Methods::ListTools;
+    const auto toolsResponse = sendHttpRequest(port, http::verb::post, "/mcp", toolsList.Serialize(),
+                                               {{"Content-Type", "application/json"},
+                                                {"Mcp-Session-Id", sessionIt->second},
+                                                {"MCP-Protocol-Version", negotiatedVersion}});
+    EXPECT_EQ(toolsResponse.status, 200);
+    JSONRPCResponse toolsResult;
+    ASSERT_TRUE(toolsResult.Deserialize(toolsResponse.body));
+    EXPECT_FALSE(toolsResult.IsError());
+    ASSERT_TRUE(toolsResult.result.has_value());
+    EXPECT_TRUE(std::get<JSONValue::Object>(toolsResult.result->value).contains("tools"));
+
+    const auto unsupportedResponse = sendHttpRequest(port, http::verb::post, "/mcp", toolsList.Serialize(),
+                                                     {{"Content-Type", "application/json"},
+                                                      {"Mcp-Session-Id", sessionIt->second},
+                                                      {"MCP-Protocol-Version", "unsupported-version"}});
+    EXPECT_EQ(unsupportedResponse.status, 400);
+
+    sseStream.reset();
+    const auto deleteResponse =
+        sendHttpRequest(port, http::verb::delete_, "/mcp", "", {{"Mcp-Session-Id", sessionIt->second}});
+    EXPECT_EQ(deleteResponse.status, 204);
     ASSERT_NO_THROW(server.Stop().get());
+}
+
+TEST(HTTPStreamable, SessionUsesVersionFromCustomInitializeHandler) {
+    const auto port = findFreePort();
+    HTTPServer::Options options;
+    options.scheme = "http";
+    options.address = "127.0.0.1";
+    options.port = std::to_string(port);
+    options.endpointPath = "/mcp";
+    HTTPServer server(options);
+    const std::string selectedVersion = "2024-11-05";
+    server.SetRequestHandler([&](const JSONRPCRequest& request) {
+        auto response = std::make_unique<JSONRPCResponse>();
+        response->id = request.id;
+        response->result = request.method == Methods::Initialize ? makeInitializeResult(selectedVersion)
+                                                                 : JSONValue{JSONValue::Object{}};
+        return response;
+    });
+    ASSERT_NO_THROW(server.Start().get());
+
+    JSONRPCRequest request;
+    request.id = static_cast<int64_t>(1);
+    request.method = Methods::Initialize;
+    request.params = makeInitializeParams();
+    const auto initialized =
+        sendHttpRequest(port, http::verb::post, "/mcp", request.Serialize(), {{"Content-Type", "application/json"}});
+    ASSERT_EQ(initialized.status, 200);
+    ASSERT_TRUE(initialized.headers.contains("Mcp-Session-Id"));
+
+    request.id = static_cast<int64_t>(2);
+    request.method = Methods::Ping;
+    request.params.reset();
+    const auto ping = sendHttpRequest(port, http::verb::post, "/mcp", request.Serialize(),
+                                      {{"Content-Type", "application/json"},
+                                       {"Mcp-Session-Id", initialized.headers.at("Mcp-Session-Id")},
+                                       {"MCP-Protocol-Version", selectedVersion}});
+    EXPECT_EQ(ping.status, 200);
+    JSONRPCResponse response;
+    ASSERT_TRUE(response.Deserialize(ping.body));
+    EXPECT_FALSE(response.IsError());
+    ASSERT_NO_THROW(server.Close().get());
+}
+
+TEST(HTTPStreamable, FailedOrMalformedInitializationDoesNotCreateSession) {
+    for (const bool malformed : {false, true}) {
+        SCOPED_TRACE(malformed);
+        const auto port = findFreePort();
+        HTTPServer::Options options;
+        options.scheme = "http";
+        options.address = "127.0.0.1";
+        options.port = std::to_string(port);
+        options.endpointPath = "/mcp";
+        HTTPServer server(options);
+        server.SetRequestHandler([malformed](const JSONRPCRequest& request) {
+            if (!malformed) {
+                return CreateErrorResponse(request.id, JSONRPCErrorCodes::InvalidParams, "Rejected initialize");
+            }
+            auto response = std::make_unique<JSONRPCResponse>();
+            response->id = request.id;
+            response->result = JSONValue{JSONValue::Object{}};
+            return response;
+        });
+        ASSERT_NO_THROW(server.Start().get());
+
+        JSONRPCRequest request;
+        request.id = static_cast<int64_t>(1);
+        request.method = Methods::Initialize;
+        request.params = makeInitializeParams("2025-06-18");
+        const auto initialized = sendHttpRequest(port, http::verb::post, "/mcp", request.Serialize(),
+                                                 {{"Content-Type", "application/json"}});
+        EXPECT_EQ(initialized.status, 200);
+        EXPECT_FALSE(initialized.headers.contains("Mcp-Session-Id"));
+        EXPECT_TRUE(server.GetSessionId().empty());
+        JSONRPCResponse response;
+        ASSERT_TRUE(response.Deserialize(initialized.body));
+        EXPECT_TRUE(response.IsError());
+        ASSERT_NO_THROW(server.Close().get());
+    }
 }
 
 TEST(HTTPStreamable, ToolCallCanRoundTripServerInitiatedSamplingResponseOverEndpoint) {

@@ -167,7 +167,7 @@ public:
     std::shared_ptr<SessionState> createSession(const std::string& protocolVersion) {
         auto session = std::make_shared<SessionState>();
         session->id = generateSessionId();
-        session->protocolVersion = protocolVersion.empty() ? std::string(PROTOCOL_VERSION) : protocolVersion;
+        session->protocolVersion = protocolVersion;
         std::lock_guard<std::mutex> lk(sessionsMutex);
         sessions[session->id] = session;
         activeSessionId = session->id;
@@ -823,19 +823,9 @@ public:
 
         std::shared_ptr<SessionState> session;
         const std::string sessionHeader = std::string(req["Mcp-Session-Id"]);
-        if (isRequest && parsedRequest.method == Methods::Initialize && sessionHeader.empty()) {
-            std::string protocolVersion = PROTOCOL_VERSION;
-            if (parsedRequest.params.has_value() &&
-                std::holds_alternative<JSONValue::Object>(parsedRequest.params->value)) {
-                const auto& paramsObj = std::get<JSONValue::Object>(parsedRequest.params->value);
-                auto it = paramsObj.find("protocolVersion");
-                if (it != paramsObj.end() && it->second &&
-                    std::holds_alternative<std::string>(it->second->value)) {
-                    protocolVersion = std::get<std::string>(it->second->value);
-                }
-            }
-            session = createSession(protocolVersion);
-        } else {
+        const bool initializeSession =
+            isRequest && parsedRequest.method == Methods::Initialize && sessionHeader.empty();
+        if (!initializeSession) {
             session = findSession(sessionHeader);
             if (!session) {
                 res.result(http::status::bad_request);
@@ -860,7 +850,32 @@ public:
         };
 
         auto routed = router ? router->route(req.body(), handlers, resolve) : std::optional<std::string>{};
-        res.set("Mcp-Session-Id", session->id);
+        if (initializeSession && routed.has_value()) {
+            JSONRPCResponse initializeResponse;
+            if (initializeResponse.Deserialize(routed.value()) && !initializeResponse.IsError()) {
+                const std::string* protocolVersion = nullptr;
+                if (initializeResponse.result.has_value()) {
+                    const auto* result = std::get_if<JSONValue::Object>(&initializeResponse.result->value);
+                    if (result) {
+                        auto it = result->find("protocolVersion");
+                        if (it != result->end() && it->second) {
+                            protocolVersion = std::get_if<std::string>(&it->second->value);
+                        }
+                    }
+                }
+                if (protocolVersion && !protocolVersion->empty()) {
+                    // The response selects the session version; the client's proposal can differ.
+                    session = createSession(*protocolVersion);
+                } else {
+                    routed = CreateErrorResponse(parsedRequest.id, JSONRPCErrorCodes::InternalError,
+                                                 "Initialize response must include a protocol version")
+                                 ->Serialize();
+                }
+            }
+        }
+        if (session) {
+            res.set("Mcp-Session-Id", session->id);
+        }
         if (routed.has_value()) {
             res.result(http::status::ok);
             res.body() = routed.value();
